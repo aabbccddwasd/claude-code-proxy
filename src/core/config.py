@@ -29,6 +29,11 @@ class Config:
         self.big_model = os.environ.get("BIG_MODEL", "gpt-4o")
         self.middle_model = os.environ.get("MIDDLE_MODEL", self.big_model)
         self.small_model = os.environ.get("SMALL_MODEL", "gpt-4o-mini")
+
+        # Thinking model settings
+        self.enable_thinking = os.environ.get("ENABLE_THINKING", "false").lower() == "true"
+        self.preserve_thinking = os.environ.get("PRESERVE_THINKING", "false").lower() == "true"
+        self.thinking_debug = os.environ.get("THINKING_DEBUG", "false").lower() == "true"
         
     def validate_api_key(self):
         """Basic API key validation"""

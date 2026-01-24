@@ -5,6 +5,7 @@ from typing import Optional, AsyncGenerator, Dict, Any
 from openai import AsyncOpenAI, AsyncAzureOpenAI
 from openai.types.chat import ChatCompletion, ChatCompletionChunk
 from openai._exceptions import APIError, RateLimitError, AuthenticationError, BadRequestError
+from src.core.logging import logger
 
 class OpenAIClient:
     """Async OpenAI client with cancellation support."""
@@ -41,18 +42,18 @@ class OpenAIClient:
             )
         self.active_requests: Dict[str, asyncio.Event] = {}
     
-    async def create_chat_completion(self, request: Dict[str, Any], request_id: Optional[str] = None) -> Dict[str, Any]:
+    async def create_chat_completion(self, request: Dict[str, Any], request_id: Optional[str] = None, extra_body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Send chat completion to OpenAI API with cancellation support."""
-        
+
         # Create cancellation token if request_id provided
         if request_id:
             cancel_event = asyncio.Event()
             self.active_requests[request_id] = cancel_event
-        
+
         try:
             # Create task that can be cancelled
             completion_task = asyncio.create_task(
-                self.client.chat.completions.create(**request)
+                self.client.chat.completions.create(**request, extra_body=extra_body or {})
             )
             
             if request_id:
@@ -100,37 +101,49 @@ class OpenAIClient:
             if request_id and request_id in self.active_requests:
                 del self.active_requests[request_id]
     
-    async def create_chat_completion_stream(self, request: Dict[str, Any], request_id: Optional[str] = None) -> AsyncGenerator[str, None]:
+    async def create_chat_completion_stream(self, request: Dict[str, Any], request_id: Optional[str] = None, extra_body: Optional[Dict[str, Any]] = None) -> AsyncGenerator[str, None]:
         """Send streaming chat completion to OpenAI API with cancellation support."""
-        
+
         # Create cancellation token if request_id provided
         if request_id:
             cancel_event = asyncio.Event()
             self.active_requests[request_id] = cancel_event
-        
+
+        chunk_count = 0
+
         try:
             # Ensure stream is enabled
             request["stream"] = True
             if "stream_options" not in request:
                 request["stream_options"] = {}
             request["stream_options"]["include_usage"] = True
-            
+
             # Create the streaming completion
-            streaming_completion = await self.client.chat.completions.create(**request)
-            
+            streaming_completion = await self.client.chat.completions.create(**request, extra_body=extra_body or {})
+
             async for chunk in streaming_completion:
                 # Check for cancellation before yielding each chunk
                 if request_id and request_id in self.active_requests:
                     if self.active_requests[request_id].is_set():
                         raise HTTPException(status_code=499, detail="Request cancelled by client")
-                
-                # Convert chunk to SSE format matching original HTTP client format
+
+                chunk_count += 1
                 chunk_dict = chunk.model_dump()
+
+                # Log first few chunks for debugging
+                if request_id and chunk_count <= 5:
+                    logger.info(f"[Request {request_id}] OpenAI流式响应 chunk #{chunk_count}: {json.dumps(chunk_dict, ensure_ascii=False)}")
+                elif request_id and chunk_count == 6:
+                    logger.info(f"[Request {request_id}] OpenAI流式响应: 后续chunks省略...")
+
+                # Convert chunk to SSE format matching original HTTP client format
                 chunk_json = json.dumps(chunk_dict, ensure_ascii=False)
                 yield f"data: {chunk_json}"
-            
+
             # Signal end of stream
             yield "data: [DONE]"
+            if request_id:
+                logger.info(f"[Request {request_id}] OpenAI流式响应完成，共 {chunk_count} 个chunks")
                 
         except AuthenticationError as e:
             raise HTTPException(status_code=401, detail=self.classify_openai_error(str(e)))

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request, Header, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
 from datetime import datetime
+import json
 import uuid
 from typing import Optional
 
@@ -60,8 +61,59 @@ async def create_message(request: ClaudeMessagesRequest, http_request: Request, 
         # Generate unique request ID for cancellation tracking
         request_id = str(uuid.uuid4())
 
-        # Convert Claude request to OpenAI format
-        openai_request = convert_claude_to_openai(request, model_manager)
+        # Log原始Anthropic请求（排除tools和system）
+        claude_request_log = {
+            "model": request.model,
+            "max_tokens": request.max_tokens,
+            "stream": request.stream,
+            "temperature": request.temperature,
+            "top_p": request.top_p,
+            "top_k": request.top_k,
+            "stop_sequences": request.stop_sequences,
+            "tools_count": len(request.tools) if request.tools else 0,
+            "tool_choice": request.tool_choice,
+            "thinking": {
+                "enabled": request.thinking.enabled if request.thinking else None,
+                "thinking_budget": request.thinking.thinking_budget if request.thinking else None,
+            } if request.thinking else None,
+            "messages_count": len(request.messages),
+            "messages_preview": [
+                {"role": msg.role, "content_preview": str(msg.content)[:200] if msg.content else None}
+                for msg in request.messages[:3]
+            ],
+        }
+        logger.info(f"[Request {request_id}] Claude原始请求: {json.dumps(claude_request_log, ensure_ascii=False)}")
+
+        # Convert Claude request to OpenAI format (returns tuple)
+        openai_request, extra_body = convert_claude_to_openai(request, model_manager)
+
+        # Log转换后的OpenAI请求（过滤掉tools和system）
+        # 过滤 messages 中的 system 消息，只保留数量
+        filtered_messages = []
+        system_count = 0
+        for msg in openai_request.get("messages", []):
+            if msg.get("role") == "system":
+                system_count += 1
+                filtered_messages.append({"role": "system", "content": f"<省略, 共{len(msg.get('content', ''))}字符>"})
+            else:
+                filtered_messages.append(msg)
+
+        openai_request_log = {
+            "model": openai_request.get("model"),
+            "messages": filtered_messages,
+            "messages_count": len(openai_request.get("messages", [])),
+            "system_messages_count": system_count,
+            "max_tokens": openai_request.get("max_tokens"),
+            "temperature": openai_request.get("temperature"),
+            "top_p": openai_request.get("top_p"),
+            "stream": openai_request.get("stream"),
+            "stop": openai_request.get("stop"),
+            "tools_count": len(openai_request.get("tools", [])),
+            "tool_choice": openai_request.get("tool_choice"),
+        }
+        logger.info(f"[Request {request_id}] OpenAI转换请求: {json.dumps(openai_request_log, ensure_ascii=False)}")
+        if extra_body:
+            logger.info(f"[Request {request_id}] OpenAI extra_body: {json.dumps(extra_body, ensure_ascii=False)}")
 
         # Check if client disconnected before processing
         if await http_request.is_disconnected():
@@ -71,7 +123,7 @@ async def create_message(request: ClaudeMessagesRequest, http_request: Request, 
             # Streaming response - wrap in error handling
             try:
                 openai_stream = openai_client.create_chat_completion_stream(
-                    openai_request, request_id
+                    openai_request, request_id, extra_body
                 )
                 return StreamingResponse(
                     convert_openai_streaming_to_claude_with_cancellation(
@@ -103,13 +155,48 @@ async def create_message(request: ClaudeMessagesRequest, http_request: Request, 
                 }
                 return JSONResponse(status_code=e.status_code, content=error_response)
         else:
-            # Non-streaming response
+            # Non-streaming response - pass extra_body
             openai_response = await openai_client.create_chat_completion(
-                openai_request, request_id
+                openai_request, request_id, extra_body
             )
+            # 过滤响应中的 content，只保留简短预览
+            openai_response_filtered = openai_response.copy()
+            if "choices" in openai_response_filtered and openai_response_filtered["choices"]:
+                choice = openai_response_filtered["choices"][0].copy()
+                if "message" in choice:
+                    message = choice["message"].copy()
+                    # 只保留 content 的前200字符
+                    if "content" in message and message["content"]:
+                        content_preview = str(message["content"])[:200] + "..." if len(str(message["content"])) > 200 else message["content"]
+                        message["content"] = f"<{content_preview}>"
+                    choice["message"] = message
+                openai_response_filtered["choices"] = [choice]
+            logger.info(f"[Request {request_id}] OpenAI原始响应: {json.dumps(openai_response_filtered, ensure_ascii=False)}")
+
             claude_response = convert_openai_to_claude_response(
                 openai_response, request
             )
+            # 过滤 Claude 响应中的 content，只保留简短预览和类型
+            claude_response_filtered = claude_response.copy()
+            if "content" in claude_response_filtered:
+                filtered_content = []
+                for block in claude_response_filtered["content"]:
+                    if isinstance(block, dict):
+                        filtered_block = {"type": block.get("type")}
+                        if block.get("type") == "text":
+                            text = block.get("text", "")
+                            filtered_block["text_preview"] = text[:200] + "..." if len(text) > 200 else text
+                            filtered_block["text_length"] = len(text)
+                        elif block.get("type") == "thinking":
+                            text = block.get("text", "")
+                            filtered_block["thinking_length"] = len(text)
+                            filtered_block["thinking_preview"] = text[:200] + "..." if len(text) > 200 else text
+                        elif block.get("type") == "tool_use":
+                            filtered_block["name"] = block.get("name")
+                            filtered_block["id"] = block.get("id")
+                        filtered_content.append(filtered_block)
+                claude_response_filtered["content"] = filtered_content
+            logger.info(f"[Request {request_id}] Claude最终响应: {json.dumps(claude_response_filtered, ensure_ascii=False)}")
             return claude_response
     except HTTPException:
         raise

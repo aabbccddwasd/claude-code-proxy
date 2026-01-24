@@ -11,8 +11,13 @@ logger = logging.getLogger(__name__)
 
 def convert_claude_to_openai(
     claude_request: ClaudeMessagesRequest, model_manager
-) -> Dict[str, Any]:
-    """Convert Claude API request format to OpenAI format."""
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Convert Claude API request format to OpenAI format.
+
+    Returns:
+        tuple: (openai_request, extra_body)
+    """
 
     # Map model
     openai_model = model_manager.map_claude_model_to_openai(claude_request.model)
@@ -126,7 +131,21 @@ def convert_claude_to_openai(
         else:
             openai_request["tool_choice"] = "auto"
 
-    return openai_request
+    # Build extra_body for thinking support
+    extra_body = {}
+    should_enable_thinking = (
+        config.enable_thinking or
+        (claude_request.thinking and claude_request.thinking.enabled)
+    )
+
+    if should_enable_thinking:
+        extra_body["chat_template_kwargs"] = {"enable_thinking": True}
+        extra_body["parallel_tool_calls"] = True
+
+        if claude_request.thinking and claude_request.thinking.thinking_budget:
+            extra_body["chat_template_kwargs"]["thinking_budget"] = claude_request.thinking.thinking_budget
+
+    return openai_request, extra_body
 
 
 def convert_claude_user_message(msg: ClaudeMessage) -> Dict[str, Any]:
@@ -166,19 +185,22 @@ def convert_claude_user_message(msg: ClaudeMessage) -> Dict[str, Any]:
 
 
 def convert_claude_assistant_message(msg: ClaudeMessage) -> Dict[str, Any]:
-    """Convert Claude assistant message to OpenAI format."""
+    """Convert Claude assistant message to OpenAI format with thinking support."""
     text_parts = []
+    thinking_parts = []
     tool_calls = []
 
     if msg.content is None:
         return {"role": Constants.ROLE_ASSISTANT, "content": None}
-    
+
     if isinstance(msg.content, str):
         return {"role": Constants.ROLE_ASSISTANT, "content": msg.content}
 
     for block in msg.content:
         if block.type == Constants.CONTENT_TEXT:
             text_parts.append(block.text)
+        elif block.type == Constants.CONTENT_THINKING:
+            thinking_parts.append(block.text)
         elif block.type == Constants.CONTENT_TOOL_USE:
             tool_calls.append(
                 {
@@ -193,11 +215,22 @@ def convert_claude_assistant_message(msg: ClaudeMessage) -> Dict[str, Any]:
 
     openai_message = {"role": Constants.ROLE_ASSISTANT}
 
-    # Set content
+    # Set text content
     if text_parts:
         openai_message["content"] = "".join(text_parts)
     else:
         openai_message["content"] = None
+
+    # Set thinking content (GLM format uses reasoning_content)
+    if thinking_parts:
+        thinking_text = "".join(thinking_parts)
+        openai_message["reasoning_content"] = thinking_text
+
+        # Debug log
+        if config.thinking_debug:
+            debug_preview = thinking_text[:100] + "..." if len(thinking_text) > 100 else thinking_text
+            logger.info(f"[Thinking Request] Preview: {debug_preview}")
+            logger.info(f"[Thinking Request] Length: {len(thinking_text)} chars")
 
     # Set tool calls
     if tool_calls:
