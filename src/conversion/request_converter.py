@@ -139,7 +139,7 @@ def convert_claude_to_openai(
     )
 
     if should_enable_thinking:
-        extra_body["chat_template_kwargs"] = {"enable_thinking": True}
+        extra_body["chat_template_kwargs"] = {"enable_thinking": True, "clear_thinking": config.clear_thinking}
         extra_body["parallel_tool_calls"] = True
 
         if claude_request.thinking and claude_request.thinking.thinking_budget:

@@ -34,6 +34,7 @@ class Config:
         self.enable_thinking = os.environ.get("ENABLE_THINKING", "false").lower() == "true"
         self.preserve_thinking = os.environ.get("PRESERVE_THINKING", "false").lower() == "true"
         self.thinking_debug = os.environ.get("THINKING_DEBUG", "false").lower() == "true"
+        self.clear_thinking = os.environ.get("CLEAR_THINKING", "false").lower() == "true"
         
     def validate_api_key(self):
         """Basic API key validation"""
