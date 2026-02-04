@@ -183,7 +183,7 @@ async def convert_openai_streaming_to_claude(
                                     "id": None,
                                     "name": None,
                                     "args_buffer": "",
-                                    "json_sent": False,
+                                    "sent": False,
                                     "claude_index": None,
                                     "started": False
                                 }
@@ -208,20 +208,10 @@ async def convert_openai_streaming_to_claude(
 
                                 yield f"event: {Constants.EVENT_CONTENT_BLOCK_START}\ndata: {json.dumps({'type': Constants.EVENT_CONTENT_BLOCK_START, 'index': claude_index, 'content_block': {'type': Constants.CONTENT_TOOL_USE, 'id': tool_call['id'], 'name': tool_call['name'], 'input': {}}}, ensure_ascii=False)}\n\n"
 
-                            # Handle function arguments
+                            # Handle function arguments - accumulate without sending intermediate events
                             if "arguments" in function_data and tool_call["started"] and function_data["arguments"] is not None:
                                 tool_call["args_buffer"] += function_data["arguments"]
-
-                                # Try to parse complete JSON and send delta when we have valid JSON
-                                try:
-                                    json.loads(tool_call["args_buffer"])
-                                    # If parsing succeeds and we haven't sent this JSON yet
-                                    if not tool_call["json_sent"]:
-                                        yield f"event: {Constants.EVENT_CONTENT_BLOCK_DELTA}\ndata: {json.dumps({'type': Constants.EVENT_CONTENT_BLOCK_DELTA, 'index': tool_call['claude_index'], 'delta': {'type': Constants.DELTA_INPUT_JSON, 'partial_json': tool_call['args_buffer']}}, ensure_ascii=False)}\n\n"
-                                        tool_call["json_sent"] = True
-                                except json.JSONDecodeError:
-                                    # JSON is incomplete, continue accumulating
-                                    pass
+                                # Note: Complete JSON will be sent when finish_reason is tool_calls
 
                     # Handle finish reason
                     if finish_reason:
@@ -229,6 +219,18 @@ async def convert_openai_streaming_to_claude(
                         if thinking_started and not thinking_finished:
                             yield f"event: {Constants.EVENT_CONTENT_BLOCK_STOP}\ndata: {json.dumps({'type': Constants.EVENT_CONTENT_BLOCK_STOP, 'index': 0}, ensure_ascii=False)}\n\n"
                             text_finished = True
+
+                        # 发送完整的工具调用（对于流式或旧版不流式情况）
+                        if finish_reason in ["tool_calls", "function_call"]:
+                            for tool_data in current_tool_calls.values():
+                                if tool_data.get("started") and tool_data.get("args_buffer") and not tool_data.get("sent"):
+                                    try:
+                                        # Validate JSON before sending
+                                        json.loads(tool_data["args_buffer"])
+                                        yield f"event: {Constants.EVENT_CONTENT_BLOCK_DELTA}\ndata: {json.dumps({'type': Constants.EVENT_CONTENT_BLOCK_DELTA, 'index': tool_data['claude_index'], 'delta': {'type': Constants.DELTA_INPUT_JSON, 'partial_json': tool_data['args_buffer']}}, ensure_ascii=False)}\n\n"
+                                        tool_data["sent"] = True
+                                    except json.JSONDecodeError:
+                                        logger.warning(f"Failed to parse tool arguments: {tool_data['args_buffer'][:100]}..., error: {e}")
 
                         if finish_reason == "length":
                             final_stop_reason = Constants.STOP_MAX_TOKENS
@@ -262,6 +264,16 @@ async def convert_openai_streaming_to_claude(
     # 如果有 text content，发送其 stop 事件
     if text_started:
         yield f"event: {Constants.EVENT_CONTENT_BLOCK_STOP}\ndata: {json.dumps({'type': Constants.EVENT_CONTENT_BLOCK_STOP, 'index': text_block_index}, ensure_ascii=False)}\n\n"
+
+    # 发送未发送的工具调用（用于新版不流式情况）
+    for tool_data in current_tool_calls.values():
+        if tool_data.get("started") and tool_data.get("args_buffer") and not tool_data.get("sent"):
+            try:
+                json.loads(tool_data["args_buffer"])  # Validate
+                yield f"event: {Constants.EVENT_CONTENT_BLOCK_DELTA}\ndata: {json.dumps({'type': Constants.EVENT_CONTENT_BLOCK_DELTA, 'index': tool_data['claude_index'], 'delta': {'type': Constants.DELTA_INPUT_JSON, 'partial_json': tool_data['args_buffer']}}, ensure_ascii=False)}\n\n"
+                tool_data["sent"] = True
+            except json.JSONDecodeError:
+                pass  # JSON invalid, skip
 
     for tool_data in current_tool_calls.values():
         if tool_data.get("started") and tool_data.get("claude_index") is not None:
@@ -377,24 +389,24 @@ async def convert_openai_streaming_to_claude_with_cancellation(
                     if "tool_calls" in delta and delta["tool_calls"]:
                         for tc_delta in delta["tool_calls"]:
                             tc_index = tc_delta.get("index", 0)
-                            
+
                             # Initialize tool call tracking by index if not exists
                             if tc_index not in current_tool_calls:
                                 current_tool_calls[tc_index] = {
                                     "id": None,
                                     "name": None,
                                     "args_buffer": "",
-                                    "json_sent": False,
+                                    "sent": False,
                                     "claude_index": None,
                                     "started": False
                                 }
-                            
+
                             tool_call = current_tool_calls[tc_index]
-                            
+
                             # Update tool call ID if provided
                             if tc_delta.get("id"):
                                 tool_call["id"] = tc_delta["id"]
-                            
+
                             # Update function name and start content block if we have both id and name
                             function_data = tc_delta.get(Constants.TOOL_FUNCTION, {})
                             if function_data.get("name"):
@@ -409,23 +421,25 @@ async def convert_openai_streaming_to_claude_with_cancellation(
                                 
                                 yield f"event: {Constants.EVENT_CONTENT_BLOCK_START}\ndata: {json.dumps({'type': Constants.EVENT_CONTENT_BLOCK_START, 'index': claude_index, 'content_block': {'type': Constants.CONTENT_TOOL_USE, 'id': tool_call['id'], 'name': tool_call['name'], 'input': {}}}, ensure_ascii=False)}\n\n"
                             
-                            # Handle function arguments
+                            # Handle function arguments - accumulate without sending intermediate events
                             if "arguments" in function_data and tool_call["started"] and function_data["arguments"] is not None:
                                 tool_call["args_buffer"] += function_data["arguments"]
-                                
-                                # Try to parse complete JSON and send delta when we have valid JSON
-                                try:
-                                    json.loads(tool_call["args_buffer"])
-                                    # If parsing succeeds and we haven't sent this JSON yet
-                                    if not tool_call["json_sent"]:
-                                        yield f"event: {Constants.EVENT_CONTENT_BLOCK_DELTA}\ndata: {json.dumps({'type': Constants.EVENT_CONTENT_BLOCK_DELTA, 'index': tool_call['claude_index'], 'delta': {'type': Constants.DELTA_INPUT_JSON, 'partial_json': tool_call['args_buffer']}}, ensure_ascii=False)}\n\n"
-                                        tool_call["json_sent"] = True
-                                except json.JSONDecodeError:
-                                    # JSON is incomplete, continue accumulating
-                                    pass
+                                # Note: Complete JSON will be sent when finish_reason is tool_calls
 
                     # Handle finish reason
                     if finish_reason:
+                        # 发送完整的工具调用（对于流式或旧版不流式情况）
+                        if finish_reason in ["tool_calls", "function_call"]:
+                            for tool_data in current_tool_calls.values():
+                                if tool_data.get("started") and tool_data.get("args_buffer") and not tool_data.get("sent"):
+                                    try:
+                                        # Validate JSON before sending
+                                        json.loads(tool_data["args_buffer"])
+                                        yield f"event: {Constants.EVENT_CONTENT_BLOCK_DELTA}\ndata: {json.dumps({'type': Constants.EVENT_CONTENT_BLOCK_DELTA, 'index': tool_data['claude_index'], 'delta': {'type': Constants.DELTA_INPUT_JSON, 'partial_json': tool_data['args_buffer']}}, ensure_ascii=False)}\n\n"
+                                        tool_data["sent"] = True
+                                    except json.JSONDecodeError:
+                                        logger.warning(f"Failed to parse tool arguments: {tool_data['args_buffer'][:100]}..., error: {e}")
+
                         if finish_reason == "length":
                             final_stop_reason = Constants.STOP_MAX_TOKENS
                         elif finish_reason in ["tool_calls", "function_call"]:
@@ -472,6 +486,16 @@ async def convert_openai_streaming_to_claude_with_cancellation(
     # 如果有 text content，发送其 stop 事件
     if text_started:
         yield f"event: {Constants.EVENT_CONTENT_BLOCK_STOP}\ndata: {json.dumps({'type': Constants.EVENT_CONTENT_BLOCK_STOP, 'index': text_block_index}, ensure_ascii=False)}\n\n"
+
+    # 发送未发送的工具调用（用于新版不流式情况）
+    for tool_data in current_tool_calls.values():
+        if tool_data.get("started") and tool_data.get("args_buffer") and not tool_data.get("sent"):
+            try:
+                json.loads(tool_data["args_buffer"])  # Validate
+                yield f"event: {Constants.EVENT_CONTENT_BLOCK_DELTA}\ndata: {json.dumps({'type': Constants.EVENT_CONTENT_BLOCK_DELTA, 'index': tool_data['claude_index'], 'delta': {'type': Constants.DELTA_INPUT_JSON, 'partial_json': tool_data['args_buffer']}}, ensure_ascii=False)}\n\n"
+                tool_data["sent"] = True
+            except json.JSONDecodeError:
+                pass  # JSON invalid, skip
 
     for tool_data in current_tool_calls.values():
         if tool_data.get("started") and tool_data.get("claude_index") is not None:
