@@ -9,6 +9,41 @@ from src.core.config import config
 logger = logging.getLogger(__name__)
 
 
+def _accumulate_tool_argument(args_buffer: str, new_args: str) -> str:
+    """
+    累积工具调用参数，智能处理完整 JSON 与片段。
+
+    Args:
+        args_buffer: 当前累积的参数缓冲区
+        new_args: 新传入的参数片段或完整 JSON
+
+    Returns:
+        更新后的参数缓冲区
+
+    注意事项:
+        - 如果 new_args 是完整的有效 JSON，直接替换 args_buffer
+        - 如果 new_args 是 JSON 片段，累积到 args_buffer
+        - 空片段或 None 会被忽略
+
+    这是处理 OpenAI 流式响应中的特殊情况：
+        某些模型可能在最后一块中同时包含 finish_reason="tool_calls" 和工具调用的完整参数，
+        此时需要用完整参数替换之前的碎片累积，而不是继续追加。
+    """
+    # 空值保护
+    if not new_args or new_args is None:
+        return args_buffer
+
+    # 尝试解析为完整 JSON
+    try:
+        json.loads(new_args)
+        # 如果成功解析，说明是完整 JSON，直接替换
+        return new_args
+    except json.JSONDecodeError:
+        # 解析失败，说明是片段，累积到缓冲区
+        return args_buffer + new_args
+
+
+
 def convert_openai_to_claude_response(
     openai_response: dict, original_request: ClaudeMessagesRequest
 ) -> dict:
@@ -210,7 +245,9 @@ async def convert_openai_streaming_to_claude(
 
                             # Handle function arguments - accumulate without sending intermediate events
                             if "arguments" in function_data and tool_call["started"] and function_data["arguments"] is not None:
-                                tool_call["args_buffer"] += function_data["arguments"]
+                                tool_call["args_buffer"] = _accumulate_tool_argument(
+                                    tool_call["args_buffer"], function_data["arguments"]
+                                )
                                 # Note: Complete JSON will be sent when finish_reason is tool_calls
 
                     # Handle finish reason
@@ -423,7 +460,9 @@ async def convert_openai_streaming_to_claude_with_cancellation(
                             
                             # Handle function arguments - accumulate without sending intermediate events
                             if "arguments" in function_data and tool_call["started"] and function_data["arguments"] is not None:
-                                tool_call["args_buffer"] += function_data["arguments"]
+                                tool_call["args_buffer"] = _accumulate_tool_argument(
+                                    tool_call["args_buffer"], function_data["arguments"]
+                                )
                                 # Note: Complete JSON will be sent when finish_reason is tool_calls
 
                     # Handle finish reason
