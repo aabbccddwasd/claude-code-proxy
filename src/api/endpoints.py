@@ -8,7 +8,7 @@ from typing import Optional
 from src.core.config import config
 from src.core.logging import logger
 from src.core.client import OpenAIClient
-from src.models.claude import ClaudeMessagesRequest, ClaudeTokenCountRequest
+from src.models.claude import ClaudeMessagesRequest, ClaudeTokenCountRequest, EventLoggingBatchResponse
 from src.conversion.request_converter import convert_claude_to_openai
 from src.conversion.response_converter import (
     convert_openai_to_claude_response,
@@ -245,6 +245,47 @@ async def count_tokens(request: ClaudeTokenCountRequest, _: None = Depends(valid
     except Exception as e:
         logger.error(f"Error counting tokens: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/event_logging/batch")
+async def event_logging_batch(request: Request, _: None = Depends(validate_api_key)):
+    """批量事件日志记录接口"""
+    try:
+        try:
+            body = await request.json()
+        except:
+            body = {}
+
+        batch_id = body.get("batch_id") or f"batch_{uuid.uuid4().hex[:16]}"
+        events = body.get("events", [])
+        if not isinstance(events, list):
+            events = [events] if events else []
+
+        processed_count = len(events)
+
+        if events:
+            logger.debug(f"Event Logging Batch: batch_id={batch_id}, events_count={processed_count}")
+            for i, event in enumerate(events[:5]):
+                event_type = event.get("event_type", "unknown") if isinstance(event, dict) else "unknown"
+                logger.debug(f"   Event {i+1}: type={event_type}")
+            if processed_count > 5:
+                logger.debug(f"   ... and {processed_count - 5} more events")
+
+        return EventLoggingBatchResponse(
+            success=True,
+            batch_id=batch_id,
+            processed_count=processed_count,
+            message="Events logged successfully"
+        )
+
+    except Exception as e:
+        logger.warning(f"Event logging batch error: {e}")
+        return EventLoggingBatchResponse(
+            success=True,
+            batch_id=f"batch_{uuid.uuid4().hex[:16]}",
+            processed_count=0,
+            message="Events received"
+        )
 
 
 @router.get("/health")

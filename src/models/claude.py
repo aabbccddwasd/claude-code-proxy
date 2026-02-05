@@ -79,3 +79,11 @@ class ClaudeTokenCountRequest(BaseModel):
     tools: Optional[List[ClaudeTool]] = None
     thinking: Optional[ClaudeThinkingConfig] = None
     tool_choice: Optional[Dict[str, Any]] = None
+
+
+class EventLoggingBatchResponse(BaseModel):
+    """Response model for event logging batch endpoint"""
+    success: bool
+    batch_id: str
+    processed_count: int
+    message: str

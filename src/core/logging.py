@@ -14,15 +14,6 @@ class SystemReminderFilter(logging.Filter):
             )
         return True
 
-
-class NotFound404Filter(logging.Filter):
-    """Filter to suppress 404 Not Found log messages for specific URL."""
-
-    def filter(self, record):
-        if record.msg and "//api/event_logging/batch" in str(record.msg):
-            return False
-        return True
-
 # Parse log level - extract just the first word to handle comments
 log_level = config.log_level.split()[0].upper()
 
@@ -49,8 +40,3 @@ root_logger.setLevel(logging.ERROR)
 # Configure uvicorn to be quieter
 for uvicorn_logger in ["uvicorn", "uvicorn.access", "uvicorn.error"]:
     logging.getLogger(uvicorn_logger).setLevel(logging.WARNING)
-
-# Apply 404 filter to uvicorn.access
-uvicorn_access_logger = logging.getLogger("uvicorn.access")
-for handler in uvicorn_access_logger.handlers:
-    handler.addFilter(NotFound404Filter())
